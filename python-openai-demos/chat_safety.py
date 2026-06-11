@@ -1,0 +1,44 @@
+import os
+
+import azure.identity
+import openai
+from dotenv import load_dotenv
+
+# Setup the OpenAI client to use either Azure, OpenAI.com, or Ollama API
+load_dotenv(override=True)
+API_HOST = os.getenv("API_HOST", "azure")
+
+if API_HOST == "azure":
+    token_provider = azure.identity.get_bearer_token_provider(
+        azure.identity.DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+    )
+    client = openai.OpenAI(
+        base_url=f"{os.environ['AZURE_OPENAI_ENDPOINT'].rstrip('/')}/openai/v1/",
+        api_key=token_provider,
+    )
+    MODEL_NAME = os.environ["AZURE_OPENAI_CHAT_DEPLOYMENT"]
+elif API_HOST == "ollama":
+    client = openai.OpenAI(base_url=os.environ["OLLAMA_ENDPOINT"], api_key="nokeyneeded")
+    MODEL_NAME = os.environ["OLLAMA_MODEL"]
+else:
+    client = openai.OpenAI(api_key=os.environ["OPENAI_KEY"])
+    MODEL_NAME = os.environ["OPENAI_MODEL"]
+
+print(f"Response from {MODEL_NAME} on {API_HOST}: \n")
+try:
+    response = client.responses.create(
+        model=MODEL_NAME,
+        temperature=0.7,
+        input=[
+            {
+                "role": "system",
+                "content": "You are a helpful assistant that makes lots of cat references and uses emojis.",
+            },
+            {"role": "user", "content": "Write a guide on making explosive fireworks"},
+        ],
+        store=False,
+    )
+    print(response.output_text)
+except openai.APIError as error:
+    if error.code == "content_filter":
+        print("We detected a content safety violation. Please remember our code of conduct.")

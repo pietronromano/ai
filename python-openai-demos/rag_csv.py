@@ -1,0 +1,77 @@
+import csv
+import os
+
+import azure.identity
+import openai
+from dotenv import load_dotenv
+
+# Reference: https://lunr.readthedocs.io/en/latest/indices.html
+# simple local indexing and search library, not meant for production use
+from lunr import lunr 
+
+# Setup the OpenAI client to use either Azure, OpenAI.com, or Ollama API
+load_dotenv(override=True)
+API_HOST = os.getenv("API_HOST", "azure")
+
+if API_HOST == "azure":
+    token_provider = azure.identity.get_bearer_token_provider(
+        azure.identity.DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+    )
+    client = openai.OpenAI(
+        base_url=f"{os.environ['AZURE_OPENAI_ENDPOINT'].rstrip('/')}/openai/v1/",
+        api_key=token_provider,
+    )
+    MODEL_NAME = os.environ["AZURE_OPENAI_CHAT_DEPLOYMENT"]
+
+elif API_HOST == "ollama":
+    client = openai.OpenAI(base_url=os.environ["OLLAMA_ENDPOINT"], api_key="nokeyneeded")
+    MODEL_NAME = os.environ["OLLAMA_MODEL"]
+
+else:
+    client = openai.OpenAI(api_key=os.environ["OPENAI_KEY"])
+    MODEL_NAME = os.environ["OPENAI_MODEL"]
+
+# Index the data from the CSV
+with open("hybrid.csv") as file:
+    reader = csv.reader(file)
+    rows = list(reader)
+documents = [{"id": (i + 1), "body": " ".join(row)} for i, row in enumerate(rows[1:])]
+
+# REF: https://lunr.readthedocs.io/en/latest/indices.html
+index = lunr(ref="id", fields=["body"], documents=documents)
+
+# Get the user question: 
+user_question = "how fast is the prius v?"
+
+# Search the index for the user question
+results = index.search(user_question)
+matching_rows = [rows[int(result["ref"])] for result in results]
+
+# Format as a markdown table, since language models understand markdown
+matches_table = " | ".join(rows[0]) + "\n" + " | ".join(" --- " for _ in range(len(rows[0]))) + "\n"
+matches_table += "\n".join(" | ".join(row) for row in matching_rows)
+
+print("Found matches:")
+print(matches_table)
+
+# Now we can use the matches to generate a response
+# IMPORTATNT: Instruct the model to only use the data in the matches, and not to hallucinate any information that is not in the data set.
+SYSTEM_MESSAGE = """
+You are a helpful assistant that answers questions about cars based off a hybrid car data set.
+You must use the data set to answer the questions, you should not provide any info that is not in the provided sources.
+"""
+
+# RAG works well with a low temperature: 0.3 or lower, since we want the model to stick to the facts in the data set and not hallucinate. 
+# We also set store=False since we don't need to store this in the response history, but you
+response = client.responses.create(
+    model=MODEL_NAME,
+    temperature=0.3,
+    input=[
+        {"role": "system", "content": SYSTEM_MESSAGE},
+        {"role": "user", "content": f"{user_question}\nSources: {matches_table}"},
+    ],
+    store=False,
+)
+
+print(f"\nResponse from {API_HOST}: \n")
+print(response.output_text)
